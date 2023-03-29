@@ -33,10 +33,10 @@ void main() async {
   });
 
   var pool = UTPSocketClient();
-  var s1 = await pool.connect(InternetAddress.tryParse('127.0.0.1'), port);
+  var s1 = await pool.connect(InternetAddress.tryParse('127.0.0.1')!, port);
   var cbys = utf8.encode(chinese).length;
   print(
-      '[Client] Connect ${s1.remoteAddress.address}:${s1.remotePort}[${s1.connectionId}] successfully. Start to send ${(total * cbys) / 1024}kb datas');
+      '[Client] Connect ${s1!.remoteAddress.address}:${s1.remotePort}[${s1.connectionId}] successfully. Start to send ${(total * cbys) / 1024}kb datas');
   for (var i = 0; i < total; i++) {
     s1.write(chinese);
   }

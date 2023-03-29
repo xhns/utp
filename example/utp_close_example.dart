@@ -21,8 +21,8 @@ void main(List<String> args) async {
   print('Server listening: $port');
   var client = UTPSocketClient();
   var socket =
-      await client.connect(InternetAddress.tryParse('127.0.0.1'), port);
-  socket.listen((datas) {}, onDone: () async {
+      await client.connect(InternetAddress.tryParse('127.0.0.1')!, port);
+  socket!.listen((datas) {}, onDone: () async {
     print('client socket closed');
     await client.close();
   });

@@ -42,23 +42,23 @@ class UTPPacket {
   int resend = 0;
 
   /// This is the 'microseconds' parts of the timestamp of when this packet was sent.
-  int sendTime;
+  int? sendTime;
 
   /// This is the difference between the local time and the timestamp in the last received packet,
   /// at the time the last packet was received.
   ///
-  int timestampDifference;
+  int? timestampDifference;
 
   /// This is a random, unique, number identifying all the packets that belong to the same connection.
-  int connectionId;
+  int? connectionId;
 
-  int wnd_size;
+  int? wnd_size;
 
   /// This is the sequence number of this packet.
-  int seq_nr;
+  int? seq_nr;
 
   /// This is the sequence number the sender of the packet last received in the other direction.
-  int ack_nr;
+  int? ack_nr;
 
   int version;
 
@@ -73,15 +73,15 @@ class UTPPacket {
   int type;
 
   /// The data payload buffer
-  List<int> payload;
+  List<int>? payload;
 
   // Extensions
   List<Extension> extensionList = <Extension>[];
 
-  Uint8List _bytes;
+  Uint8List? _bytes;
 
   int get length {
-    if (payload != null) return payload.length - offset;
+    if (payload != null) return payload!.length - offset;
     return 0;
   }
 
@@ -98,13 +98,13 @@ class UTPPacket {
     assert(type <= 15 && type >= 0, 'Bad type');
     assert(version <= 15 && version >= 0, 'Bad version');
     assert(connectionId != null, 'Bad connection id');
-    connectionId &= MAX_UINT16;
+    connectionId = connectionId! & MAX_UINT16;
     assert(wnd_size != null, 'Bad wnd_size');
-    wnd_size &= MAX_UINT32;
+    wnd_size = wnd_size! & MAX_UINT32;
     assert(seq_nr != null, 'Bad seq_nr');
-    seq_nr &= MAX_UINT16;
+    seq_nr = seq_nr! & MAX_UINT16;
     assert(ack_nr != null, 'Bad ack_nr');
-    ack_nr &= MAX_UINT16;
+    ack_nr = ack_nr! & MAX_UINT16;
     assert(sendTime != null, 'Bad timestamp');
     assert(timestampDifference != null, 'Bad time difference');
   }
@@ -130,32 +130,32 @@ class UTPPacket {
   ///
   /// [time] is the timestamp , sometimes we need get a new bytes buffer with
   /// different timestamp.
-  Uint8List getBytes({int time, int wndSize, int timeDiff, int seq, int ack}) {
+  Uint8List? getBytes({int? time, int? wndSize, int? timeDiff, int? seq, int? ack}) {
     sendTime = time ?? sendTime;
     wnd_size = wndSize ?? wnd_size;
-    wnd_size &= MAX_UINT32;
+    wnd_size = wnd_size! & MAX_UINT32;
     timestampDifference = timeDiff ?? timestampDifference;
     seq_nr = seq ?? seq_nr;
-    seq_nr &= MAX_UINT16;
+    seq_nr = seq_nr! & MAX_UINT16;
     ack_nr = ack ?? ack_nr;
-    ack_nr &= MAX_UINT16;
+    ack_nr = ack_nr! & MAX_UINT16;
 
     if (_bytes == null) {
       var p = payload;
       if (offset != 0) {
-        p = List<int>(payload.length - offset);
-        List.copyRange(p, 0, payload, offset);
+        p = List<int>.filled(payload!.length - offset,0);
+        List.copyRange(p, 0, payload!, offset);
       }
-      _bytes = _createData(type, connectionId, sendTime, timestampDifference,
-          wnd_size, seq_nr, ack_nr,
+      _bytes = _createData(type, connectionId!, sendTime!, timestampDifference!,
+          wnd_size!, seq_nr!, ack_nr!,
           payload: p, extensions: extensionList);
     } else {
-      var view = ByteData.view(_bytes.buffer);
-      view.setUint32(4, sendTime & MAX_UINT32);
-      view.setUint32(8, timestampDifference & MAX_UINT32);
-      view.setUint32(12, wnd_size);
-      view.setUint16(16, seq_nr);
-      view.setUint16(18, ack_nr);
+      var view = ByteData.view(_bytes!.buffer);
+      view.setUint32(4, sendTime! & MAX_UINT32);
+      view.setUint32(8, timestampDifference! & MAX_UINT32);
+      view.setUint32(12, wnd_size!);
+      view.setUint16(16, seq_nr!);
+      view.setUint16(18, ack_nr!);
     }
     return _bytes;
   }
@@ -173,7 +173,7 @@ class UTPPacket {
 
   bool operator <(b) {
     if (b is UTPPacket) {
-      return compareSeqLess(seq_nr, b.seq_nr);
+      return compareSeqLess(seq_nr!, b.seq_nr!);
     }
     throw 'Different type can not compare';
   }
@@ -259,7 +259,7 @@ class SelectiveACK extends Extension {
 
 Uint8List _createData(int type, int connectionId, int timestamp,
     int timestampDifference, int wnd_size, int seq_nr, int ack_nr,
-    {int version = VERSION, List<Extension> extensions, List<int> payload}) {
+    {int version = VERSION, List<Extension>? extensions, List<int>? payload}) {
   assert(type <= 15 && type >= 0, 'Bad type');
   assert(version <= 15 && version >= 0, 'Bad version');
   connectionId &= MAX_UINT16;
@@ -307,13 +307,13 @@ Uint8List _createData(int type, int connectionId, int timestamp,
   view.setUint16(16, seq_nr);
   view.setUint16(18, ack_nr);
   if (payloadLen > 0) {
-    List.copyRange(bytes, payloadStart, payload);
+    List.copyRange(bytes, payloadStart, payload!);
   }
   return bytes;
 }
 
 /// Parse bytes [data] to `UTPData` instance
-UTPPacket parseData(List<int> datas) {
+UTPPacket? parseData(List<int>? datas) {
   if (datas == null || datas.isEmpty || datas.length < 20) return null;
   var data = Uint8List.fromList(datas);
   var view = ByteData.view(data.buffer);
