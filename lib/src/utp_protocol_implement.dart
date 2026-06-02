@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:collection';
 import 'dart:convert';
 import 'dart:developer' as dev;
 import 'dart:io';
@@ -495,7 +496,10 @@ class _UTPSocket extends UTPSocket {
 
   int? minPacketRTT;
 
-  final List<List<int>> _baseDelays = <List<int>>[];
+  /// Rolling 5-second window of `[timestampMs, delay]` samples. A [Queue]
+  /// gives O(1) drop-from-front on expiry instead of `List.removeAt(0)`'s O(n)
+  /// shift on every ACK.
+  final Queue<List<int>> _baseDelays = ListQueue<List<int>>();
 
   /// 发送FIN消息并关闭socket的一个future控制completer
   Completer? _closeCompleter;
@@ -508,13 +512,56 @@ class _UTPSocket extends UTPSocket {
 
   StreamController<Uint8List>? _receiveDataStreamController;
 
-  final List<UTPPacket> _receivePacketBuffer = <UTPPacket>[];
+  /// Out-of-order receive buffer, keyed by `seq_nr`.
+  ///
+  /// Kept ordered by a wrap-aware comparator anchored on [_lastRemoteSeq] so
+  /// the contiguous-prefix walk in [addReceivePacket] and the SACK build in
+  /// [newSelectiveACK] are correct across the uint16 boundary, without ever
+  /// re-sorting a `List` per packet. Insert/lookup/remove are all O(log n);
+  /// membership is O(log n) via [containsKey] instead of O(n) `List.contains`.
+  late final SplayTreeMap<int, UTPPacket> _receivePacketBuffer =
+      SplayTreeMap<int, UTPPacket>(_compareReceiveSeq);
+
+  /// Wrap-aware ordering for buffered receive seqs: order by forward distance
+  /// from the last in-order remote seq. All buffered seqs are ahead of
+  /// [_lastRemoteSeq], so this yields a correct ascending order even when the
+  /// seq space wraps past [MAX_UINT16].
+  int _compareReceiveSeq(int a, int b) {
+    final da = (a - _lastRemoteSeq) & MAX_UINT16;
+    final db = (b - _lastRemoteSeq) & MAX_UINT16;
+    return da - db;
+  }
 
   Timer? _addDataTimer;
 
   final List<int> _sendingDataCache = <int>[];
 
   List<int> _sendingDataBuffer = <int>[];
+
+  /// Read cursor into [_sendingDataBuffer]. Consumed bytes sit in
+  /// `[0, _sendingDataOffset)`; unsent bytes are `[_sendingDataOffset, end)`.
+  /// We advance this cursor instead of `sublist`-ing (recompacting) the whole
+  /// tail on every send batch, and only physically compact occasionally.
+  int _sendingDataOffset = 0;
+
+  /// Bytes still waiting to be sent.
+  int get _sendingDataRemaining =>
+      _sendingDataBuffer.length - _sendingDataOffset;
+
+  /// Drop the already-sent prefix when the cursor has drifted far enough that
+  /// keeping it around wastes memory. Cheap no-op in the common steady state.
+  void _maybeCompactSendingBuffer() {
+    if (_sendingDataOffset == 0) return;
+    if (_sendingDataOffset == _sendingDataBuffer.length) {
+      _sendingDataBuffer.clear();
+      _sendingDataOffset = 0;
+    } else if (_sendingDataOffset >= 4096 &&
+        _sendingDataOffset * 2 >= _sendingDataBuffer.length) {
+      _sendingDataBuffer =
+          _sendingDataBuffer.sublist(_sendingDataOffset);
+      _sendingDataOffset = 0;
+    }
+  }
 
   final Map<int, int> _duplicateAckCountMap = <int, int>{};
 
@@ -577,7 +624,7 @@ class _UTPSocket extends UTPSocket {
   ///
   void _requestSendData([List<int>? data]) {
     if (data != null && data.isNotEmpty) _sendingDataBuffer.addAll(data);
-    if (_sendingDataBuffer.isEmpty) {
+    if (_sendingDataRemaining == 0) {
       if (_closeCompleter != null &&
           !_closeCompleter!.isCompleted &&
           _sendingDataCache.isEmpty) {
@@ -591,11 +638,14 @@ class _UTPSocket extends UTPSocket {
     if (allowSize <= 0) {
       return;
     } else {
-      var sendingBufferSize = _sendingDataBuffer.length;
+      var sendingBufferSize = _sendingDataRemaining;
       allowSize = min(allowSize, sendingBufferSize);
       var packetNum = allowSize ~/ _packetSize;
       var remainSize = allowSize.remainder(_packetSize);
-      var offset = 0;
+      // Cursor into the persistent buffer; we advance it rather than
+      // re-slicing the whole tail per batch.
+      var offset = _sendingDataOffset;
+      var startOffset = offset;
 
       if (packetNum == 0 &&
           _sendingDataCache.isEmpty &&
@@ -625,7 +675,10 @@ class _UTPSocket extends UTPSocket {
           }
         }
       }
-      if (offset != 0) _sendingDataBuffer = _sendingDataBuffer.sublist(offset);
+      if (offset != startOffset) {
+        _sendingDataOffset = offset;
+        _maybeCompactSendingBuffer();
+      }
       Timer.run(() => _requestSendData());
       // _requestSendData();
     }
@@ -990,12 +1043,9 @@ class _UTPSocket extends UTPSocket {
   void _updateBaseDelay(int delay) {
     if (delay <= 0) return;
     var now = DateTime.now().millisecondsSinceEpoch;
-    _baseDelays.add([now, delay]);
-    var first = _baseDelays.first;
-    while (now - first[0] > 5000) {
-      _baseDelays.removeAt(0);
-      if (_baseDelays.isEmpty) break;
-      first = _baseDelays.first;
+    _baseDelays.addLast([now, delay]);
+    while (_baseDelays.isNotEmpty && now - _baseDelays.first[0] > 5000) {
+      _baseDelays.removeFirst();
     }
   }
 
@@ -1006,13 +1056,15 @@ class _UTPSocket extends UTPSocket {
     if (_baseDelays.isEmpty) return 0;
     var sum = 0;
     int? baseDiff;
-    for (var i = 0; i < _baseDelays.length; i++) {
-      var diff = _baseDelays[i][1];
+    var count = 0;
+    for (var sample in _baseDelays) {
+      var diff = sample[1];
       baseDiff ??= diff;
       baseDiff = min(baseDiff, diff);
-      sum += _baseDelays[i][1];
+      sum += diff;
+      count++;
     }
-    var avg = sum ~/ _baseDelays.length;
+    var avg = sum ~/ count;
     return avg - baseDiff!;
   }
 
@@ -1109,6 +1161,9 @@ class _UTPSocket extends UTPSocket {
 
     if (isAckType) {
       var lostPackets = <int>{};
+      // O(1) membership for the "is this seq already acked?" probe below,
+      // instead of scanning the `acked` list each time.
+      var ackedSet = acked.toSet();
       for (var i = 0; i < acked.length; i++) {
         var key = acked[i];
         if (_duplicateAckCountMap[key] == null) {
@@ -1140,7 +1195,7 @@ class _UTPSocket extends UTPSocket {
               }
             } else {
               var next = (key + 1) & MAX_UINT16;
-              if (next < currentLocalSeq && !acked.contains(next)) {
+              if (next < currentLocalSeq && !ackedSet.contains(next)) {
                 lostPackets.add(next);
               }
             }
@@ -1172,16 +1227,10 @@ class _UTPSocket extends UTPSocket {
 
     if (_inflightPackets.isEmpty && _duplicateAckCountMap.isNotEmpty) {
       _duplicateAckCountMap.clear();
-    } else {
-      var useless = <int>[];
-      for (var element in _duplicateAckCountMap.keys) {
-        if (compareSeqLess(element, ackSeq)) {
-          useless.add(element);
-        }
-      }
-      for (var element in useless) {
-        _duplicateAckCountMap.remove(element);
-      }
+    } else if (_duplicateAckCountMap.isNotEmpty) {
+      // Lazily drop stale dup-ack counters in one pass, no intermediate list.
+      _duplicateAckCountMap
+          .removeWhere((element, _) => compareSeqLess(element, ackSeq));
     }
     if (_finSended && _inflightPackets.isEmpty) {
       // 如果已经发送FIN并且发送队列中的所有packet已经被ack
@@ -1252,20 +1301,21 @@ class _UTPSocket extends UTPSocket {
   }
 
   SelectiveACK? newSelectiveACK() {
+    // Common in-order case: nothing buffered out-of-order, so there are no gaps
+    // to report. Skip the whole SACK allocation/build entirely.
     if (_receivePacketBuffer.isEmpty) return null;
-    _receivePacketBuffer.sort((a, b) {
-      if (a > b) return 1;
-      if (a < b) return -1;
-      return 0;
-    });
-    var len = _receivePacketBuffer.last.seq_nr! - lastRemoteSeq;
+    // The buffer is kept ordered (wrap-aware) by its SplayTreeMap comparator,
+    // so the highest buffered seq is the last key — no per-packet sort.
+    var highest = _receivePacketBuffer.lastKey()!;
+    var len = (highest - lastRemoteSeq) & MAX_UINT16;
     var c = len ~/ 32;
     var r = len.remainder(32);
     if (r != 0) c++;
-    var payload = List<int>.filled(c * 32, 0);
+    // Bitmask backed by a Uint8List (was a boxed List<int>).
+    var payload = Uint8List(c * 32);
     var selectiveAck = SelectiveACK(lastRemoteSeq, payload.length, payload);
-    for (var packet in _receivePacketBuffer) {
-      selectiveAck.setAcked(packet.seq_nr!);
+    for (var seq in _receivePacketBuffer.keys) {
+      selectiveAck.setAcked(seq);
     }
     return selectiveAck;
   }
@@ -1305,8 +1355,15 @@ class _UTPSocket extends UTPSocket {
   void _throwDataToListener(UTPPacket packet) {
     if (packet.payload != null && packet.payload!.isNotEmpty) {
       if (packet.offset != 0) {
-        var data = packet.payload!.sublist(packet.offset);
-        _receiveDataStreamController?.add(data as Uint8List);
+        final pl = packet.payload!;
+        // Zero-copy slice when the payload is already a Uint8List (the common
+        // case: it is the parsed datagram, which is a fresh per-receive buffer
+        // so the view stays valid). Fall back to a copy otherwise.
+        if (pl is Uint8List) {
+          _receiveDataStreamController?.add(Uint8List.sublistView(pl, packet.offset));
+        } else {
+          _receiveDataStreamController?.add(pl.sublist(packet.offset) as Uint8List);
+        }
       } else {
         _receiveDataStreamController?.add(packet.payload as Uint8List);
       }
@@ -1330,10 +1387,12 @@ class _UTPSocket extends UTPSocket {
       return;
     }
     if (compareSeqLess(expectSeq, seq)) {
-      if (_receivePacketBuffer.contains(packet)) {
+      // O(log n) membership instead of O(n) `List.contains` (which itself ran
+      // the overloaded `==`/seq scan per buffered packet).
+      if (_receivePacketBuffer.containsKey(seq)) {
         return;
       }
-      _receivePacketBuffer.add(packet);
+      _receivePacketBuffer[seq] = packet;
     }
     if (seq == expectSeq) {
       // 这是期待的正确顺序包
@@ -1342,18 +1401,14 @@ class _UTPSocket extends UTPSocket {
         _throwDataToListener(packet);
       } else {
         _throwDataToListener(packet);
-        _receivePacketBuffer.sort((a, b) {
-          if (a > b) return 1;
-          if (a < b) return -1;
-          return 0;
-        });
-        var nextPacket = _receivePacketBuffer.first;
-        while (nextPacket.seq_nr == ((lastRemoteSeq + 1) & MAX_UINT16)) {
-          lastRemoteSeq = nextPacket.seq_nr;
+        // The buffer is already ordered (wrap-aware) by the SplayTreeMap
+        // comparator, so just walk the contiguous prefix — no sort.
+        while (_receivePacketBuffer.isNotEmpty) {
+          var nextSeq = _receivePacketBuffer.firstKey()!;
+          if (nextSeq != ((lastRemoteSeq + 1) & MAX_UINT16)) break;
+          var nextPacket = _receivePacketBuffer.remove(nextSeq)!;
+          lastRemoteSeq = nextSeq;
           _throwDataToListener(nextPacket);
-          _receivePacketBuffer.removeAt(0);
-          if (_receivePacketBuffer.isEmpty) break;
-          nextPacket = _receivePacketBuffer.first;
         }
       }
     }
@@ -1504,6 +1559,7 @@ class _UTPSocket extends UTPSocket {
     _requestSendAckMap.clear();
 
     _sendingDataBuffer.clear();
+    _sendingDataOffset = 0;
     _keepAliveTimer?.cancel();
 
     _baseDelays.clear();

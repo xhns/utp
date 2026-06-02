@@ -143,8 +143,16 @@ class UTPPacket {
     if (_bytes == null) {
       var p = payload;
       if (offset != 0) {
-        p = List<int>.filled(payload!.length - offset,0);
-        List.copyRange(p, 0, payload!, offset);
+        // Zero-copy slice of the payload tail. `_createData` only reads this
+        // via `List.copyRange`, so a view is sufficient and avoids an extra
+        // per-packet allocation + copy of the whole tail.
+        final pl = payload!;
+        if (pl is Uint8List) {
+          p = Uint8List.sublistView(pl, offset);
+        } else {
+          p = List<int>.filled(pl.length - offset, 0);
+          List.copyRange(p, 0, pl, offset);
+        }
       }
       _bytes = _createData(type, connectionId!, sendTime!, timestampDifference!,
           wnd_size!, seq_nr!, ack_nr!,
@@ -311,8 +319,16 @@ Uint8List _createData(int type, int connectionId, int timestamp,
 /// Parse bytes [data] to `UTPData` instance
 UTPPacket? parseData(List<int>? datas) {
   if (datas == null || datas.isEmpty || datas.length < 20) return null;
-  var data = Uint8List.fromList(datas);
-  var view = ByteData.view(data.buffer);
+  // Zero-copy fast path: a RawDatagramSocket hands us a `Uint8List` already,
+  // so reuse its backing store directly instead of copying every inbound
+  // datagram. Fall back to a copy only for the rare non-typed `List<int>`.
+  Uint8List data;
+  if (datas is Uint8List) {
+    data = datas;
+  } else {
+    data = Uint8List.fromList(datas);
+  }
+  var view = ByteData.view(data.buffer, data.offsetInBytes, data.length);
   var first = data[0];
   var type = first ~/ 16;
   var version = first.remainder(16);
