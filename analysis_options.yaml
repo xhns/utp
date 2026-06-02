@@ -1,14 +1,14 @@
-# Defines a default set of lint rules enforced for
-# projects at Google. For details and rationale,
-# see https://github.com/dart-lang/pedantic#enabled-lints.
-include: package:pedantic/analysis_options.yaml
+include: package:lints/recommended.yaml
 
-# For lint rules and documentation, see http://dart-lang.github.io/linter/lints.
-# Uncomment to specify additional rules.
-# linter:
-#   rules:
-#     - camel_case_types
-
-analyzer:
-#   exclude:
-#     - path/to/excluded/files/**
+# For lint rules and documentation, see https://dart.dev/lints.
+linter:
+  rules:
+    # The public protocol API intentionally keeps the BEP0029 wire-field
+    # names (MAX_UINT16, ST_DATA, seq_nr, wnd_size, ack_nr, ...). Renaming
+    # them to lowerCamelCase would break the package's public contract and
+    # every downstream consumer, so these style rules are disabled.
+    constant_identifier_names: false
+    non_constant_identifier_names: false
+    # Internal close-handler callbacks pass the private _UTPSocket type; this
+    # is by design (the type is not part of the consumer-facing surface).
+    library_private_types_in_public_api: false

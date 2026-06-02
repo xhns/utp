@@ -164,9 +164,9 @@ class UTPPacket {
   int get hashCode => seq_nr.toString().hashCode;
 
   @override
-  bool operator ==(b) {
-    if (b is UTPPacket) {
-      return b.seq_nr == seq_nr;
+  bool operator ==(Object other) {
+    if (other is UTPPacket) {
+      return other.seq_nr == seq_nr;
     }
     return false;
   }
@@ -216,18 +216,14 @@ class Extension {
   int start;
 
   Extension(this.id, this.length, this.payload, [this.start = 0]) {
-    assert(
-        id != null && length != null && payload != null && payload.length >= 4,
-        'Bad extension parameters');
+    assert(payload.length >= 4, 'Bad extension parameters');
   }
 }
 
 class SelectiveACK extends Extension {
   final int _ack;
   SelectiveACK(this._ack, int length, List<int> payload, [int start = 0])
-      : super(1, length, payload, start) {
-    assert(_ack != null, 'Bad ACK number');
-  }
+      : super(1, length, payload, start);
 
   List<int> getAckeds() {
     var l = <int>[];
@@ -361,7 +357,6 @@ String intToRadix2String(int i) {
 
 /// Get 53bit timestamp
 int getNowTimestamp([int offset = 0]) {
-  offset ??= 0;
   return DateTime.now().microsecondsSinceEpoch - offset;
 }
 
